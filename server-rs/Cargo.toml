@@ -1,0 +1,25 @@
+[package]
+name = "mfs-server-rs"
+version = "0.4.0-beta.1"
+edition = "2021"
+authors = ["Cheney Zhang <chen.zhang@zilliz.com>"]
+description = "MFS server hot-path acceleration (PyO3): gitignore walk, parallel hashing, grep, tail"
+license = "Apache-2.0"
+repository = "https://github.com/zilliztech/mfs"
+homepage = "https://github.com/zilliztech/mfs"
+
+[lib]
+name = "mfs_server_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+walkdir = "2.5"
+regex = "1.10"
+ignore = "0.4"
+rayon = "1.10"
+sha1 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
