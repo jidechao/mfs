@@ -44,11 +44,23 @@ class MilvusStore:
         self.dim = cfg.embedding.dim
         self.client: Optional[MilvusClient] = None
 
+    # mfs default consistency for read paths. Differs from Milvus' SDK default
+    # (Bounded, ~5s staleness) because mfs UX is "add a file, search it now".
+    # The cost on remote Milvus is 100–500 ms of search latency in exchange
+    # for no "I just ingested and search returned nothing" surprise window.
+    # On Milvus Lite the choice is moot — no replication means Bounded == Strong.
+    # Power users can override via [milvus] consistency_level in server.toml.
+    _DEFAULT_CONSISTENCY = "Strong"
+
     def _cl_kw(self) -> dict[str, Any]:
-        """Return {} when consistency_level is empty (= let pymilvus use its
-        default), {'consistency_level': X} otherwise. Saves every call site
-        from a conditional."""
-        return {"consistency_level": self.consistency_level} if self.consistency_level else {}
+        """Return {'consistency_level': X} for every read call.
+
+        Uses the user-configured value from cfg.milvus.consistency_level when
+        set (empty / unset = our _DEFAULT_CONSISTENCY). Saves every call site
+        from a conditional and keeps the read-after-write story consistent.
+        """
+        level = self.consistency_level or self._DEFAULT_CONSISTENCY
+        return {"consistency_level": level}
 
     def connect(self) -> None:
         kwargs: dict[str, Any] = {"uri": self.uri}
@@ -235,7 +247,6 @@ class MilvusStore:
                 "dense_vec",
                 "chunk_kind",
                 "locator",
-                "lines",
                 "metadata",
                 "indexed_at",
             ],
@@ -263,19 +274,23 @@ class MilvusStore:
             limit=limit,
             filter=expr,
             output_fields=output_fields
-            or ["chunk_id", "object_uri", "content", "chunk_kind", "locator", "lines", "metadata"],
+            or ["chunk_id", "object_uri", "content", "chunk_kind", "locator", "metadata"],
             search_params={"metric_type": "COSINE"},
             **cl_kw,
         )
         return list(res[0]) if res else []
 
+    # The collection has no top-level "lines" field — line ranges live INSIDE
+    # the JSON locator ({"lines": [start, end]} for body/code chunks). Requesting
+    # "lines" as an output_field is silently dropped by Milvus Lite (which is
+    # why CI never caught it) but fails on remote Milvus with
+    #   <MilvusException: code=1100, message=field lines not exist>
     _DEFAULT_OUT = [
         "chunk_id",
         "object_uri",
         "content",
         "chunk_kind",
         "locator",
-        "lines",
         "metadata",
     ]
 
