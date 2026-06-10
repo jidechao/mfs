@@ -49,7 +49,6 @@ guide, recipe tabs, and readback validation examples, see
 | [`jira`](#jira) | `jira://alias/projects/<key>/issues.jsonl` | Jira issue records by project. |
 | [`linear`](#linear) | `linear://alias/teams/<key>/issues.jsonl` | Linear issue records by team. |
 | [`zendesk`](#zendesk) | `zendesk://alias/tickets/records.jsonl` | Zendesk tickets, comments, users, and organizations. |
-| [`salesforce`](#salesforce) | `salesforce://alias/<SObject>/records.jsonl` | Salesforce sObject records. |
 | [`hubspot`](#hubspot) | `hubspot://alias/<object>/records.jsonl` | HubSpot CRM object records. |
 | [`bigquery`](#bigquery) | `bigquery://alias/<dataset>/tables/<table>/rows.jsonl` | BigQuery table rows and schemas. |
 | [`snowflake`](#snowflake) | `snowflake://alias/<DB>/<SCHEMA>/tables/<TABLE>/rows.jsonl` | Snowflake table rows and schemas. |
@@ -515,34 +514,45 @@ mfs cat discord://community/channels/general__987654321/messages.jsonl --locator
 **URI shape:** `gmail://<alias>/labels/<label>__<id>/messages.jsonl`. Message
 records are grouped by Gmail `threadId` by the framework preset.
 
-**Obtain credentials:** Gmail uses **Google OAuth 2.0** with a downloaded
-credentials JSON:
+**Obtain credentials:** Gmail uses a **user OAuth token JSON** — the
+`token.json` produced by Google's OAuth flow, containing
+`refresh_token` / `client_id` / `client_secret`. Service-account keys
+are not supported by the current plugin.
 
 1. Open <https://console.cloud.google.com> → create or pick a project.
 2. **APIs & Services → Library → Gmail API** → click **Enable**.
 3. **APIs & Services → Credentials → Create Credentials → OAuth client
-   ID** → Application type: **Desktop app** → name it → **Download JSON**.
-4. Save the file somewhere the server can read it
-   (e.g. `~/.mfs/gmail-credentials.json`).
-5. The first `mfs add` opens a browser to authorize; the resulting
-   `token.json` is cached next to the credentials file.
+   ID** → Application type: **Desktop app** → **Download JSON** (this
+   is the client credentials file, not the token yet).
+4. Run Google's OAuth flow once on a machine with a browser (e.g. the
+   `google-auth-oauthlib` `InstalledAppFlow.run_local_server` snippet)
+   requesting scope `https://www.googleapis.com/auth/gmail.readonly`.
+   The flow writes a `token.json` next to the client JSON.
+5. Copy `token.json` to the server and reference it from the connector
+   TOML.
 
 Required OAuth scope: `https://www.googleapis.com/auth/gmail.readonly`. The
 connector only calls `messages.list` + `messages.get`; it doesn't send or
 modify mail.
 
+If you also configure the [`gdrive`](#gdrive) connector, request
+`https://www.googleapis.com/auth/drive.readonly` in the same consent
+step — the same `token.json` then drives both connectors.
+
 **Minimum config:**
 
 ```toml
-token = "env:GMAIL_ACCESS_TOKEN"
+token = "file:/home/x/.mfs/gmail-token.json"
 labels = ["INBOX"]
 max_read_rows = 5000
 ```
 
-The current plugin builds `google.oauth2.credentials.Credentials` from the
-configured `token` value when it is a string, or from
-`Credentials.from_authorized_user_info` when the parsed TOML value is an object.
-Probe the connector in the target server before syncing.
+The plugin builds `google.oauth2.credentials.Credentials` from the
+configured `token` value when it is a string (bare access token), or from
+`Credentials.from_authorized_user_info` when the parsed TOML value is an
+object (inline token JSON). The most common form is the `file:`
+reference above. Probe the connector in the target server before
+syncing.
 
 **Start:**
 
@@ -796,66 +806,6 @@ mfs cat zendesk://acme/tickets/records.jsonl --locator '{"id":12345}'
 - Ticket comments are fetched per ticket and can be expensive on large tenants.
 - Internal comments can be indexed if the API user can see them.
 - `max_read_rows` caps each resource path.
-
-## `salesforce`
-
-**URI shape:** `salesforce://<alias>/<SObject>/records.jsonl` and
-`salesforce://<alias>/<SObject>/schema.json`.
-
-**Obtain credentials:** **username + password + security token** (SOAP
-login). OAuth flows aren't supported by this connector yet.
-
-1. **Username + Password**: your normal Salesforce login.
-2. **Security token**: log into Salesforce → **Settings → My Personal
-   Information → Reset My Security Token**. A new token is emailed to you.
-   Required whenever API access is from outside the org's trusted IP range.
-3. **Instance URL**: visible in the URL bar after login (e.g.
-   `https://acme.my.salesforce.com`). Only needed when reusing a
-   `session_id`.
-4. **Domain**: `login` for production, `test` for sandbox.
-
-If you already have a Salesforce session, set `session_id` + `instance_url`
-and the plugin skips the username/password/security-token login flow.
-
-**Minimum config:**
-
-```toml
-username = "alice@acme.com"
-password = "env:SF_PASSWORD"
-security_token = "env:SF_SECURITY_TOKEN"
-domain = "login"
-objects = ["Account", "Contact", "Opportunity", "Case"]
-
-[[objects]]
-match = "/Account"
-text_fields = ["Name", "Description"]
-locator_fields = ["Id"]
-metadata_fields = ["LastModifiedDate"]
-```
-
-If `session_id` is set, the plugin uses `instance_url` plus `session_id`
-instead of username/password/security-token login.
-
-**Start:**
-
-```bash
-mfs connector probe salesforce://acme --config ./salesforce.toml
-mfs add salesforce://acme --config ./salesforce.toml
-```
-
-**Search or browse:**
-
-```bash
-mfs search "renewal risk" salesforce://acme/Account/records.jsonl
-mfs cat salesforce://acme/Account/records.jsonl --locator '{"Id":"001AB..."}'
-```
-
-**Common pitfalls:**
-
-- Add `[[objects]]` text fields; Salesforce has no built-in row preset.
-- Field-level security controls which fields the API user can read.
-- Custom object names usually end in `__c` and must be included in `objects`.
-- Use `domain = "test"` for sandboxes.
 
 ## `hubspot`
 
@@ -1137,36 +1087,41 @@ mfs export s3://acme-docs/engineering/rfc/rfc-001.pdf /tmp/rfc-001.pdf
 **URI shape:** `gdrive://<alias>/<folder>/<file>`. Google-native Docs, Sheets,
 and Slides are exported to text or CSV-like content by the plugin.
 
-**Obtain credentials:** Google Drive uses **OAuth credentials**. Two flows:
-
-**Service account** (recommended for shared / production access):
+**Obtain credentials:** Google Drive uses a **user OAuth token JSON** —
+the `token.json` produced by Google's OAuth flow, containing
+`refresh_token` / `client_id` / `client_secret`. Service-account keys
+are not supported by the current plugin.
 
 1. GCP Console → **APIs & Services → Library** → enable **Google Drive
    API**.
-2. **Credentials → Create Credentials → Service account** → name + role
-   (`Viewer` is enough for drive read).
-3. On the service account → **Keys → Add key → JSON** → download.
-4. **Share** each Drive folder you want indexed with the service account's
-   email (`<account>@<project>.iam.gserviceaccount.com`). Without that
-   share, the account can't see the folder.
+2. **Credentials → Create Credentials → OAuth client ID** → Application
+   type: **Desktop app** → **Download JSON** (the client credentials
+   file).
+3. Run Google's OAuth flow once on a machine with a browser (e.g. the
+   `google-auth-oauthlib` `InstalledAppFlow.run_local_server` snippet)
+   requesting scope `https://www.googleapis.com/auth/drive.readonly`.
+   The flow writes a `token.json` next to the client JSON.
+4. Copy `token.json` to the server and reference it from the connector
+   TOML. The authorized user must already be able to see the files /
+   folders you want indexed (own files + files explicitly shared with
+   them).
 
-**User OAuth** (a single user's visibility):
-
-1. Same GCP console: OAuth client ID, application type **Desktop app**,
-   download the JSON.
-2. First-run browser flow on a machine with a display; resulting
-   `token.json` is cached next to credentials.
+If you also configure the [`gmail`](#gmail) connector, request
+`https://www.googleapis.com/auth/gmail.readonly` in the same consent
+step — the same `token.json` then drives both connectors.
 
 **Minimum config:**
 
 ```toml
-token = "env:GDRIVE_ACCESS_TOKEN"
+token = "file:/home/x/.mfs/gdrive-token.json"
 ```
 
-The current plugin builds `google.oauth2.credentials.Credentials` from the
-configured `token` value when it is a string, or from
-`Credentials.from_authorized_user_info` when the parsed TOML value is an object.
-Probe the connector in the target server before syncing.
+The plugin builds `google.oauth2.credentials.Credentials` from the
+configured `token` value when it is a string (bare access token), or from
+`Credentials.from_authorized_user_info` when the parsed TOML value is an
+object (inline token JSON). The most common form is the `file:`
+reference above. Probe the connector in the target server before
+syncing.
 
 **Start:**
 
@@ -1185,7 +1140,12 @@ mfs export gdrive://engineering/Product/Design.pdf /tmp/design.pdf
 
 **Common pitfalls:**
 
-- The credential can only see files shared with it.
+- The authorized user can only see files they own or that are
+  explicitly shared with them.
+- Headless server: the OAuth flow needs a browser the first time. Run
+  it on a workstation, then copy `token.json` to the server.
+- 401/403s usually mean the token was revoked or the consent did not
+  include `drive.readonly`. Re-run the OAuth flow.
 - Google-native files are exported; comments are not indexed.
 - The current plugin does not expose a folder-token scope field; it walks files
   visible to the credential.
